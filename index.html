@@ -279,11 +279,67 @@
   .drive-path { font-family:'DM Mono',monospace; font-size:10px; color:var(--accent); font-weight:600; background:var(--accent-bg); padding:1px 4px; border-radius:3px; }
 
 
+  /* Firebase sync bar */
+  .fb-bar { display:flex; align-items:center; gap:6px; margin-left:auto; padding-left:12px; flex-shrink:0; }
+  .fb-status { font-size:11px; font-weight:600; padding:3px 8px; border-radius:4px; white-space:nowrap; }
+  .fb-on { background:#ecfdf5; color:#065f46; }
+  .fb-off { background:#f5f5f5; color:#737373; }
+  .fb-syncing { background:#eff6ff; color:#1e40af; }
+  .fb-err { background:#fef2f2; color:#991b1b; }
+  .fb-btn { padding:5px 10px; font-size:11px; font-weight:600; border:1px solid var(--border); border-radius:4px; cursor:pointer; background:#fff; color:var(--text-muted); font-family:'Noto Sans SC',sans-serif; white-space:nowrap; transition:all 0.15s; }
+  .fb-btn:hover { background:var(--accent-bg); color:var(--accent); border-color:var(--accent-light); }
+  .fb-save { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .fb-save:hover { background:#1d4ed8; color:#fff; }
+  .fb-out { color:#ef4444; border-color:#fca5a5; font-size:10px; }
+  .fb-out:hover { background:#fef2f2; }
   ::-webkit-scrollbar { width: 5px; height: 5px; }
   ::-webkit-scrollbar-track { background: #f0f0f0; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<!-- Firebase -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { getFirestore, doc, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyA-jUmKKfSO5QasU94nO3nji4AWKveQcus",
+  authDomain: "jayden-planner.firebaseapp.com",
+  projectId: "jayden-planner",
+  storageBucket: "jayden-planner.firebasestorage.app",
+  messagingSenderId: "844067917643",
+  appId: "1:844067917643:web:50beaabb690bde9543a2ce"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const provider = new GoogleAuthProvider();
+
+// Expose to global scope for use in non-module scripts
+window._fbAuth = auth;
+window._fbDb = db;
+window._fbProvider = provider;
+window._fbSignInWithPopup = signInWithPopup;
+window._fbSignOut = signOut;
+window._fbOnAuthStateChanged = onAuthStateChanged;
+window._fbDoc = doc;
+window._fbSetDoc = setDoc;
+window._fbGetDoc = getDoc;
+window._fbReady = true;
+
+// Listen for auth state changes
+onAuthStateChanged(auth, (user) => {
+  if(user){
+    window._fbUser = user;
+    if(window.onFirebaseUserReady) window.onFirebaseUserReady(user);
+  } else {
+    window._fbUser = null;
+    if(window.onFirebaseUserSignedOut) window.onFirebaseUserSignedOut();
+  }
+});
+</script>
 </head>
 <body>
 
@@ -297,6 +353,13 @@
     <button class="nav-btn" onclick="changeMonth(-1)">◀ 上个月</button>
     <button class="nav-btn" onclick="changeMonth(1)">下个月 ▶</button>
     <button class="nav-btn today" onclick="goToToday()">回到今天</button>
+  </div>
+  <div class="fb-bar">
+    <div id="fbStatus" class="fb-status fb-off">⚪ 未登录</div>
+    <button id="fbLoginBtn" class="fb-btn" onclick="fbSignIn()">🔑 Google 登录同步</button>
+    <button id="fbSaveBtn" class="fb-btn fb-save" onclick="fbSave()" style="display:none">☁ 保存</button>
+    <button id="fbLoadBtn" class="fb-btn" onclick="fbLoad()" style="display:none">⬇ 读取</button>
+    <button id="fbOutBtn" class="fb-btn fb-out" onclick="fbSignOut()" style="display:none">退出</button>
   </div>
 
 </div>
@@ -487,7 +550,15 @@ let hoveredCell = null;  // {dKey, ti} — empty cell under cursor
 // ============ STORAGE ============
 function load(){try{return JSON.parse(localStorage.getItem('jaydenplan_v3')||'{}');}catch{return {};}}
 function save(data){localStorage.setItem('jaydenplan_v3',JSON.stringify(data));}
-function update(fn){const d=load();fn(d);save(d);}
+function update(fn){
+  const d=load(); fn(d);
+  d._updatedAt = Date.now();
+  save(d);
+  if(window._fbUser){
+    clearTimeout(_fbSaveDebounce);
+    _fbSaveDebounce = setTimeout(()=>fbSave(true), 5000);
+  }
+}
 
 // ============ DATE HELPERS ============
 function getMonday(d){const dt=new Date(d);const day=dt.getDay();dt.setDate(dt.getDate()+(day===0?-6:1-day));dt.setHours(0,0,0,0);return dt;}
@@ -1506,6 +1577,104 @@ function drawLineChart(canvas, scores, labels){
   });
 }
 
+
+
+// ============ FIREBASE SYNC ============
+let _fbSaveDebounce = null;
+
+function fbSetStatus(msg, cls){
+  const el = document.getElementById('fbStatus');
+  if(el){ el.textContent = msg; el.className = 'fb-status ' + cls; }
+}
+function fbShowBtns(loggedIn){
+  document.getElementById('fbLoginBtn').style.display = loggedIn ? 'none' : '';
+  document.getElementById('fbSaveBtn').style.display = loggedIn ? '' : 'none';
+  document.getElementById('fbLoadBtn').style.display = loggedIn ? '' : 'none';
+  document.getElementById('fbOutBtn').style.display = loggedIn ? '' : 'none';
+}
+
+window.onFirebaseUserReady = function(user){
+  fbSetStatus('✅ ' + user.displayName, 'fb-on');
+  fbShowBtns(true);
+  // Auto-load on first sign-in
+  fbLoad(true);
+};
+window.onFirebaseUserSignedOut = function(){
+  fbSetStatus('⚪ 未登录', 'fb-off');
+  fbShowBtns(false);
+};
+
+function fbSignIn(){
+  if(!window._fbReady){ fbSetStatus('⏳ 初始化中...', 'fb-syncing'); setTimeout(fbSignIn, 800); return; }
+  fbSetStatus('⏳ 登录中...', 'fb-syncing');
+  window._fbSignInWithPopup(window._fbAuth, window._fbProvider)
+    .catch(err => fbSetStatus('✗ 登录失败', 'fb-err'));
+}
+
+function fbSignOut(){
+  window._fbSignOut(window._fbAuth)
+    .then(() => { fbSetStatus('⚪ 未登录', 'fb-off'); fbShowBtns(false); })
+    .catch(err => fbSetStatus('✗ 退出失败', 'fb-err'));
+}
+
+async function fbSave(silent=false){
+  if(!window._fbUser){ if(!silent) fbSetStatus('请先登录', 'fb-err'); return; }
+  if(!silent) fbSetStatus('☁ 保存中...', 'fb-syncing');
+  try {
+    const data = load();
+    const uid = window._fbUser.uid;
+    const ref = window._fbDoc(window._fbDb, 'planners', uid);
+    await window._fbSetDoc(ref, { data: JSON.stringify(data), updatedAt: Date.now() });
+    if(!silent){
+      const t = new Date(); 
+      fbSetStatus('✅ 已保存 '+t.getHours()+':'+String(t.getMinutes()).padStart(2,'0'), 'fb-on');
+    }
+  } catch(err){
+    if(!silent) fbSetStatus('✗ 保存失败', 'fb-err');
+    console.error('fbSave error:', err);
+  }
+}
+
+async function fbLoad(silent=false){
+  if(!window._fbUser){ if(!silent) fbSetStatus('请先登录', 'fb-err'); return; }
+  if(!silent) fbSetStatus('⬇ 读取中...', 'fb-syncing');
+  try {
+    const uid = window._fbUser.uid;
+    const ref = window._fbDoc(window._fbDb, 'planners', uid);
+    const snap = await window._fbGetDoc(ref);
+    if(!snap.exists()){
+      // No cloud data yet — save current local data to cloud
+      await fbSave(true);
+      fbSetStatus('✅ 已连接（首次同步完成）', 'fb-on');
+      return;
+    }
+    const raw = JSON.parse(snap.data().data);
+    const imported = migrateImportedData(raw);
+    const existing = load();
+    // Use cloud data if it's newer, otherwise keep local
+    const cloudTime = snap.data().updatedAt || 0;
+    const localTime = existing._updatedAt || 0;
+    let merged;
+    if(cloudTime >= localTime){
+      merged = Object.assign({}, existing, imported);
+      if(existing.monthPools||imported.monthPools) merged.monthPools=Object.assign({},existing.monthPools||{},imported.monthPools||{});
+      if(existing.notes||imported.notes) merged.notes=Object.assign({},existing.notes||{},imported.notes||{});
+      if(imported.todos&&imported.todos.length) merged.todos=imported.todos;
+    } else {
+      merged = existing;
+    }
+    localStorage.setItem('jaydenplan_v3', JSON.stringify(merged));
+    if(!silent) fbSetStatus('✅ 数据已同步', 'fb-on');
+    else fbSetStatus('✅ ' + window._fbUser.displayName, 'fb-on');
+    renderMain(); renderPool(); renderTodo(); renderWeekCharts();
+    setTimeout(highlightNowRow, 100);
+  } catch(err){
+    if(!silent) fbSetStatus('✗ 读取失败', 'fb-err');
+    console.error('fbLoad error:', err);
+  }
+}
+
+// Auto-save timer — actual patching done in update() function directly
 
 // ============ CURRENT TIME HIGHLIGHT ============
 function getCurrentTimeslotIndex(){
